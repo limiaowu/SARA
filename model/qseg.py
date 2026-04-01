@@ -552,15 +552,22 @@ class QSegModel(nn.Module):
             seg_founds.append(len(pos) > 0)
 
         # ── 收集所有生成步的 last-layer hidden state ─────────────────────────
-        # outputs.hidden_states: tuple[num_steps] of tuple[num_layers] of (B, 1, hidden)
-        # 所有 batch item 的步数相同（batched generation 时等长，pad 后统一）
+        # outputs.hidden_states 结构：
+        #   hidden_states[0]  = prompt 的完整 hidden states，shape (B, prompt_len, D)
+        #                       最后一个位置是最后一个 prompt token，不是生成 token，跳过
+        #   hidden_states[1:] = 每个生成 token 的 hidden state，shape (B, 1, D)
+        # 训练时 labels != -100 严格排除 prompt，这里也应从 step=1 开始，保持一致。
+        gen_steps = list(range(1, num_steps))   # 跳过 step 0（prompt prefill）
+        if not gen_steps:
+            # 极端情况：模型生成 0 个 token，退化到 prompt 最后一步
+            gen_steps = [0]
         all_step_hiddens = [
             outputs.hidden_states[s][-1][:, -1, :]   # (B, 4096)
-            for s in range(num_steps)
+            for s in gen_steps
         ]
-        context_hidden = torch.stack(all_step_hiddens, dim=1)  # (B, num_steps, 4096)
+        context_hidden = torch.stack(all_step_hiddens, dim=1)  # (B, gen_len, 4096)
         # 推理时无填充，全部位置均有效
-        ctx_pad_mask = torch.zeros(B, num_steps, dtype=torch.bool, device=device)
+        ctx_pad_mask = torch.zeros(B, len(gen_steps), dtype=torch.bool, device=device)
 
         # FPN Neck
         vit_feats = {k: v.to(device) for k, v in self.feature_extractor.get_features().items()}

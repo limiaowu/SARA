@@ -34,3 +34,9 @@ Thumbs.db
 *.egg-info/
 .idea/
 .vscode/
+
+2d_grounding.ipynb
+test.py
+debug_box.py
+vis_val.py
+CLAUDE.md
