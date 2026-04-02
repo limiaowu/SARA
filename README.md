@@ -7,28 +7,62 @@
 
 ## 模型架构
 
-```
-原图(1024×1024)
-    └─ CNNBypass (~3.2M params)
-         ├─ feat_s0: (B, 256, 256, 256)    → MaskDecoder.conv_s0
-         └─ feat_s1: (B, 256, 128, 128)    → MaskDecoder.conv_s1
+```mermaid
+flowchart TD
+    IMG(["🖼 原始图像<br/>1024×1024"])
+    TEXT(["💬 文本查询<br/>'the red car on the left'"])
 
-输入图像 → Qwen3.5 ViT（全量冻结，hook [3,6,13,20,26] 层）
-    └─ FPNNeck → image_embedding (B, 256, 64, 64)
-         └─ SAM2 MaskDecoder → 低分辨率 mask → 上采样
+    IMG -->|"ImageNet norm"| CNN["CNNBypass<br/>7×7 stem · 2× stride-2 · ResBlock<br/>GroupNorm · ~3.2M params"]
+    CNN --> S0["feat_s0<br/>(B, 256, 256, 256)"]
+    CNN --> S1["feat_s1<br/>(B, 256, 128, 128)"]
 
-文本查询 → Qwen3.5 LLM（LoRA 微调 full_attention 层）
-    └─ [SEG] token hidden state (B, 4096)
-         └─ QueryExtractor (4 query × cross-attention)
-              └─ sparse embeddings (B, 4, 256)
-                   └─ PromptEncoder(text_embeddings, boxes)
+    IMG -->|"smart_resize → patch"| VIT["Qwen3.5 ViT<br/>🔒 全量冻结 · depth=27<br/>hidden_size=1152 · patch=16<br/>hook blocks &#91;3, 6, 13, 20, 26&#93;"]
+    VIT -->|"5层 pre-merger 特征"| FPN["FPNNeck<br/>top-down FPN 融合<br/>bilinear+Conv2d（无棋盘格）"]
+    FPN --> IE["image_embedding<br/>(B, 256, 64, 64)"]
+
+    TEXT --> LLM["Qwen3.5 LLM<br/>32层混合架构<br/>• 8层 full_attention → LoRA q/k/v/o_proj<br/>• 24层 GatedDeltaNet → LoRA in_proj_qkv/out_proj<br/>&#91;SEG&#93; token 全量可训练"]
+    VIT -->|"视觉 token"| LLM
+    LLM -->|"自回归生成"| GEN["模型输出<br/>{bbox_2d: &#91;x1,y1,x2,y2&#93;}<br/>+ 语义描述句 + &#91;SEG&#93;"]
+
+    GEN -->|"assistant token hidden states (B, ctx_len, 4096)"| CQE["ContextQueryExtractor<br/>2层 TransformerDecoder<br/>Pre-LN: Self-Attn → Cross-Attn → FFN<br/>16个可学习 query · kv_proj: 4096→256"]
+    CQE --> TE["text_embeddings<br/>(B, 16, 256)"]
+
+    GEN -->|"regex 解析 0-1000 → SAM 1024"| BOX["预测 BBox<br/>(B, 4)"]
+    TE --> PE["SAM2 PromptEncoder<br/>text_embeddings + boxes"]
+    BOX --> PE
+    PE --> SP["sparse prompts"]
+    PE --> DP["dense prompts"]
+
+    S0 --> CS0["conv_s0"]
+    S1 --> CS1["conv_s1"]
+    CS0 & CS1 --> HRF["high_res_features"]
+
+    IE --> MD["SAM2 MaskDecoder<br/>TwoWayTransformer · depth=2<br/>iou_head + obj_score_head"]
+    SP --> MD
+    DP --> MD
+    HRF --> MD
+    MD --> LRM["低分辨率 mask<br/>(B, 1, 256, 256)"]
+
+    LRM -->|"bilinear upsample"| OUT(["✅ 分割 Mask<br/>(B, H, W)"])
+
+    classDef input     fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef frozen    fill:#fef3c7,stroke:#f59e0b,color:#78350f
+    classDef trainable fill:#dcfce7,stroke:#22c55e,color:#14532d
+    classDef sam       fill:#f3e8ff,stroke:#a855f7,color:#4a044e
+    classDef output    fill:#d1fae5,stroke:#10b981,color:#064e3b
+    class IMG,TEXT input
+    class VIT frozen
+    class CNN,FPN,LLM,CQE trainable
+    class PE,MD sam
+    class OUT output
 ```
 
 ### Qwen3.5-9B 架构说明
 
-- **ViT**：27 层 Transformer block，`hidden_size=1152`，`patch_size=16`；hook 层为 block 索引 [3, 6, 13, 20, 26]（pre-merger 特征）
-- **LLM**：32 层，其中 8 层为 full_attention（层索引 3/7/11/15/19/23/27/31，有 q/k/v/o_proj），24 层为 linear_attention（GatedDeltaNet）；LoRA 只作用于 full_attention 层
-- **词表**：248,320 tokens；`[SEG]` 通过 `add_tokens()` 追加
+- **ViT**：27 层 Transformer block，`hidden_size=1152`，`patch_size=16`；hook 层为 block 索引 [3, 6, 13, 20, 26]（pre-merger 特征）；**全量冻结**，由 CNNBypass 补充高频信息
+- **LLM**：32 层混合架构，8 层 full_attention（有 q/k/v/o_proj）+ 24 层 GatedDeltaNet linear_attention（有 in_proj_qkv/out_proj）；两类共 32 层均加 LoRA
+- **词表**：248,320 tokens；`[SEG]` 通过 `add_tokens()` 追加，embed_tokens 和 lm_head 对应行全量可训练
+- **ContextQueryExtractor**：取生成序列全部 assistant token 的 hidden states 作为 KV，16 个可学习 query 通过 2 层 Transformer Decoder 聚合语义，输出作为 SAM2 sparse embeddings
 
 ---
 
@@ -141,21 +175,16 @@ import torch
 
 ckpt = torch.load("best_model/qseg_weights.pt", map_location="cpu", weights_only=False)
 
+# LoRA 权重（含 [SEG] token 的 TrainableTokens delta）
 set_peft_model_state_dict(model.qwen, ckpt["lora"])
 model.neck.load_state_dict(ckpt["neck"])
 model.cnn_bypass.load_state_dict(ckpt["cnn_bypass"])
-model.query_extractor.load_state_dict(ckpt["query_extractor"])
+model.context_query_extractor.load_state_dict(ckpt["context_query_extractor"])
 model.mask_decoder.load_state_dict(ckpt["mask_decoder"])
 model.prompt_encoder.load_state_dict(ckpt["prompt_encoder"])
-
-lm = model.qwen.base_model.model.model.language_model
-lm.embed_tokens.load_state_dict(
-    {k: v.bfloat16() for k, v in ckpt["embed_tokens"].items()}
-)
-model.qwen.base_model.model.lm_head.load_state_dict(
-    {k: v.bfloat16() for k, v in ckpt["lm_head"].items()}
-)
 ```
+
+checkpoint 包含的键：`lora` · `neck` · `cnn_bypass` · `context_query_extractor` · `mask_decoder` · `prompt_encoder` · `seg_token_idx`
 
 ---
 
@@ -164,7 +193,8 @@ model.qwen.base_model.model.lm_head.load_state_dict(
 ```
 QSeg/
 ├── model/
-│   ├── qseg.py             # 主模型 QSegModel + QueryExtractor
+│   ├── qseg.py             # 主模型 QSegModel
+│   ├── context_query.py    # ContextQueryExtractor：LENS 风格 2层TransformerDecoder
 │   ├── adaptive_neck.py    # FPNNeck：ViT 多层特征 → image_embedding (64×64)
 │   ├── cnn_bypass.py       # CNNBypass：原图 → 真实高分辨率 skip features
 │   └── vision_neck.py      # Qwen35VisionFeatureExtractor：ViT block hook 注册
