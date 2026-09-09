@@ -132,12 +132,7 @@ def load_model(args, rank):
     model.neck.load_state_dict(ckpt["neck"])
     if model.cnn_bypass is not None:
         model.cnn_bypass.load_state_dict(ckpt["cnn_bypass"])
-    cqe_key = "context_query_extractor" if "context_query_extractor" in ckpt else "query_extractor"
-    if cqe_key in ckpt:
-        model.context_query_extractor.load_state_dict(ckpt[cqe_key])
-    else:
-        if is_main(rank):
-            print("[WARN] context_query_extractor not found, using random init.")
+    model.response_aggregation.load_state_dict(ckpt["response_aggregation"])
     model.mask_decoder.load_state_dict(ckpt["mask_decoder"])
     model.prompt_encoder.load_state_dict(ckpt["prompt_encoder"])
 

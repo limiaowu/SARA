@@ -336,7 +336,7 @@ def parse_args():
     # 模型结构
     parser.add_argument("--hook_layers", type=int, nargs="+", default=[3, 6, 13, 20, 26])
     parser.add_argument("--num_queries", type=int, default=16,
-                        help="ContextQueryExtractor 的可学习 query 数量")
+                        help="Response Aggregation 的可学习 query 数量")
     parser.add_argument("--no_cnn_bypass", action="store_true",
                         help="消融：关闭 CNN bypass，decoder 高分辨率特征改用 FPN 输出上采样")
 
@@ -415,7 +415,7 @@ def main():
         init_checkpoint = torch.load(args.init_weights, map_location="cpu", weights_only=False)
         if "hook_layers" in init_checkpoint:
             args.hook_layers = list(init_checkpoint["hook_layers"])
-        query_state = init_checkpoint.get("context_query_extractor", {})
+        query_state = init_checkpoint.get("response_aggregation", {})
         if "queries" in query_state:
             args.num_queries = int(query_state["queries"].shape[0])
         if "use_cnn_bypass" in init_checkpoint:

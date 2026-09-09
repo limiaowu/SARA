@@ -1,15 +1,13 @@
 # =============================================================================
-# model/context_query.py
-# ContextQueryExtractor：LENS 风格的 Context Query 模块
-#
-# 相比原 QueryExtractor 的改进：
-#   KV 从单 [SEG] token 扩展为完整生成序列的 hidden states
+# model/response_aggregation.py
+# Response Aggregation module:
+#   KV 来自完整生成序列的 hidden states
 #     - 训练：labels != -100 标记的所有 assistant token 的 hidden states
 #       （包含 bbox 坐标 token、语义句子 token、[SEG] token）
 #     - 推理：逐步生成时每步的 last-layer hidden state 拼成的序列
 #   架构从单层 cross-attention 升级为 N 层 TransformerDecoder block
 #     （Pre-LN：self-attn → cross-attn → FFN，各含残差连接）
-#   queries 4 → 16（默认，可配置）
+#   query 数量可配置
 #
 # 这使每个 query 能同时注意到：
 #   bbox 坐标 token（空间先验）、语义句子 token、[SEG] token 本身，
@@ -74,9 +72,9 @@ class _DecoderLayer(nn.Module):
         return queries
 
 
-class ContextQueryExtractor(nn.Module):
+class ResponseAggregation(nn.Module):
     """
-    LENS 风格的 Context Query 提取器。
+    Aggregate the generated response into learnable mask prompts.
 
     从 LLM 生成序列的全部 hidden states 中提取丰富的上下文信息，
     通过 num_layers 层 TransformerDecoder 将信息聚合到 num_queries 个可学习

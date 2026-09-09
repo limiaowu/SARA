@@ -56,7 +56,7 @@ def load_model(args):
 
     checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     hook_layers = _infer_hook_layers(checkpoint, args.hook_layers)
-    query_state = checkpoint.get("context_query_extractor", {})
+    query_state = checkpoint.get("response_aggregation", {})
     num_queries = args.num_queries
     if num_queries is None and "queries" in query_state:
         num_queries = int(query_state["queries"].shape[0])

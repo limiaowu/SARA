@@ -17,7 +17,7 @@ from sam_decoder.prompt_encoder import PromptEncoder
 from sam_decoder.transformer import TwoWayTransformer
 from .adaptive_neck import FPNNeck
 from .cnn_bypass import CNNBypass
-from .context_query import ContextQueryExtractor
+from .response_aggregation import ResponseAggregation
 from .loss import seg_loss
 from .vision_neck import Qwen35VisionFeatureExtractor
 
@@ -126,7 +126,7 @@ class SARAModel(nn.Module):
         原图 → CNNBypass → feat_s0 (256×256), feat_s1 (128×128)
         图像 → Qwen3.5 ViT（hook 多层特征）→ FPNNeck → image_embedding (64×64)
         文本 → Qwen3.5 LLM → 生成序列 assistant token hidden states
-                            → ContextQueryExtractor (N query × 2层 TransformerDecoder)
+                            → ResponseAggregation (N query × 2层 TransformerDecoder)
                             → (B, N, 256) sparse embeddings
                             → PromptEncoder(text_embeddings, boxes)
         image_embedding + sparse/dense prompts + high_res_features → MaskDecoder → mask
@@ -242,10 +242,10 @@ class SARAModel(nn.Module):
             if _is_main():
                 print("CNN bypass DISABLED（消融）：高分辨率特征 = FPN 输出上采样到 256²/128²。")
 
-        # ── 8. ContextQueryExtractor（LENS 风格）─────────────────────────
+        # ── 8. Response Aggregation ──────────────────────────────────────
         # 2 层 TransformerDecoder，从 LLM 生成序列的全部 assistant hidden states
         # 中提取语义，聚合到 num_queries 个可学习 query 上。
-        self.context_query_extractor = ContextQueryExtractor(
+        self.response_aggregation = ResponseAggregation(
             llm_dim=llm_hidden,  # 9B=4096，4B 等小型号不同，从 embedding 自动取
             embed_dim=256,
             num_queries=num_queries,
@@ -266,7 +266,7 @@ class SARAModel(nn.Module):
         self.neck = self.neck.bfloat16()
         if self.cnn_bypass is not None:
             self.cnn_bypass = self.cnn_bypass.bfloat16()
-        self.context_query_extractor = self.context_query_extractor.bfloat16()
+        self.response_aggregation = self.response_aggregation.bfloat16()
         self.mask_decoder = self.mask_decoder.bfloat16()
         self.prompt_encoder = self.prompt_encoder.bfloat16()
 
@@ -314,7 +314,7 @@ class SARAModel(nn.Module):
             ("FPNNeck",                *_count(self.neck)),
             ("CNNBypass",              *(_count(self.cnn_bypass) if self.cnn_bypass is not None
                                          else (0, 0))),
-            ("ContextQueryExtractor",  *_count(self.context_query_extractor)),
+            ("ResponseAggregation",    *_count(self.response_aggregation)),
             ("MaskDecoder",            *_count(self.mask_decoder)),
             ("PromptEncoder",          *_count(self.prompt_encoder)),
         ]
@@ -434,7 +434,7 @@ class SARAModel(nn.Module):
             padded_ctx[b, :L] = ctx.bfloat16()
             ctx_pad_mask[b, :L] = False
 
-        text_emb = self.context_query_extractor(padded_ctx, ctx_pad_mask)  # (B, M, 256)
+        text_emb = self.response_aggregation(padded_ctx, ctx_pad_mask)  # (B, M, 256)
 
         # ── Step 3: ViT 特征 → FPN Neck → image_embedding ────────────────
         vit_feats = {k: v.to(device) for k, v in self.feature_extractor.get_features().items()}
@@ -688,8 +688,8 @@ class SARAModel(nn.Module):
         vit_feats = {k: v.to(device) for k, v in self.feature_extractor.get_features().items()}
         image_embedding = self.neck(vit_feats, image_grid_thw.to(device)).bfloat16()
 
-        # ContextQueryExtractor
-        text_emb = self.context_query_extractor(
+        # Response Aggregation
+        text_emb = self.response_aggregation(
             context_hidden.to(device).bfloat16(), ctx_pad_mask,
         )
 
@@ -784,7 +784,7 @@ class SARAModel(nn.Module):
         self.neck.load_state_dict(checkpoint["neck"])
         if self.cnn_bypass is not None:
             self.cnn_bypass.load_state_dict(checkpoint["cnn_bypass"])
-        self.context_query_extractor.load_state_dict(checkpoint["context_query_extractor"])
+        self.response_aggregation.load_state_dict(checkpoint["response_aggregation"])
         self.mask_decoder.load_state_dict(checkpoint["mask_decoder"])
         self.prompt_encoder.load_state_dict(checkpoint["prompt_encoder"])
 
@@ -799,7 +799,7 @@ class SARAModel(nn.Module):
         state = {
             "lora": get_peft_model_state_dict(self.qwen),
             "neck": self.neck.state_dict(),
-            "context_query_extractor": self.context_query_extractor.state_dict(),
+            "response_aggregation": self.response_aggregation.state_dict(),
             "mask_decoder": self.mask_decoder.state_dict(),
             "prompt_encoder": self.prompt_encoder.state_dict(),
             "seg_token_idx": self.seg_token_idx,
