@@ -17,7 +17,7 @@ SARA is a unified model for referring and reasoning segmentation. It uses Qwen3.
 **Results on the ReasoningSeg benchmark.** The best results are shown in bold.
 
 <p align="center">
-  <img src="assets/ReasoningSeg.png" width="80%" alt="Results on the ReasoningSeg benchmark">
+  <img src="assets/ReasoningSeg.png" width="50%" alt="Results on the ReasoningSeg benchmark">
 </p>
 
 ## Qualitative Results
